@@ -61,10 +61,13 @@ struct SettingsView: View {
 
                     Section {
                         Button(role: .destructive) {
+                            NSLog("Nightingale: wipe button tapped")
                             showWipeConfirm = true
                         } label: {
                             Text("一键清空所有数据")
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .buttonStyle(.borderless)
                     }
                     .listRowBackground(Theme.surface)
 
@@ -80,9 +83,12 @@ struct SettingsView: View {
                 permissions.refreshMicrophoneStatus()
                 storageBytes = fileStore.totalBytesUsed()
             }
-            .confirmationDialog("确认清空？", isPresented: $showWipeConfirm) {
-                Button("清空所有录音", role: .destructive, action: wipeAll)
-                Button("取消", role: .cancel) {}
+            .alert("确认清空？", isPresented: $showWipeConfirm) {
+                Button("取消", role: .cancel) { }
+                Button("清空所有录音", role: .destructive) {
+                    NSLog("Nightingale: executing wipeAll, sessions.count=\(sessions.count)")
+                    wipeAll()
+                }
             } message: {
                 Text("所有整夜录音文件和 session 记录会被永久删除，不可恢复。")
             }
@@ -156,10 +162,15 @@ struct SettingsView: View {
     }
 
     private func wipeAll() {
+        let beforeFiles = fileStore.totalBytesUsed()
+        let beforeCount = sessions.count
+
         try? FileManager.default.removeItem(at: fileStore.recordingsDirectory)
         try? FileManager.default.removeItem(at: fileStore.clipsDirectory)
         for s in sessions { modelContext.delete(s) }
         try? modelContext.save()
         storageBytes = 0
+
+        NSLog("Nightingale: wipeAll done, cleared \(beforeCount) sessions and \(beforeFiles) bytes")
     }
 }
