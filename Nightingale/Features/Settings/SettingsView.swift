@@ -5,6 +5,7 @@ struct SettingsView: View {
 
     let fileStore: AudioFileStore
     @ObservedObject var permissions: PermissionManager
+    @ObservedObject var healthKit: HealthKitSync
 
     @Environment(\.modelContext) private var modelContext
     @Query private var sessions: [SleepSession]
@@ -19,6 +20,7 @@ struct SettingsView: View {
                 List {
                     Section("权限") {
                         permissionRow("麦克风", status: micStatusText, color: micStatusColor)
+                        permissionRow("健康数据", status: healthStatusText, color: healthStatusColor)
                     }
                     .listRowBackground(Theme.surface)
 
@@ -38,7 +40,7 @@ struct SettingsView: View {
                     .listRowBackground(Theme.surface)
 
                     Section("版本") {
-                        row(label: "Nightingale", value: "Phase 1A")
+                        row(label: "Nightingale", value: "Phase 1B")
                     }
                     .listRowBackground(Theme.surface)
                 }
@@ -74,6 +76,23 @@ struct SettingsView: View {
         }
     }
 
+    private var healthStatusText: String {
+        switch healthKit.authStatus {
+        case .granted: "已授权"
+        case .denied: "已拒绝（请到系统设置开启）"
+        case .notRequested: "尚未请求（录完一晚后自动请求）"
+        case .unavailable: "不可用（设备不支持）"
+        }
+    }
+
+    private var healthStatusColor: Color {
+        switch healthKit.authStatus {
+        case .granted: Theme.accent
+        case .denied, .unavailable: Theme.danger
+        case .notRequested: Theme.textTertiary
+        }
+    }
+
     private func permissionRow(_ name: String, status: String, color: Color) -> some View {
         HStack {
             Text(name).foregroundStyle(Theme.textPrimary)
@@ -100,6 +119,7 @@ struct SettingsView: View {
 
     private func wipeAll() {
         try? FileManager.default.removeItem(at: fileStore.recordingsDirectory)
+        try? FileManager.default.removeItem(at: fileStore.clipsDirectory)
         for s in sessions { modelContext.delete(s) }
         try? modelContext.save()
         storageBytes = 0

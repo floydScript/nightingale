@@ -5,6 +5,7 @@ struct AppRoot: View {
 
     let fileStore: AudioFileStore
     @ObservedObject var permissions: PermissionManager
+    @ObservedObject var healthKit: HealthKitSync
     @ObservedObject var controller: RecorderController
 
     var body: some View {
@@ -15,8 +16,12 @@ struct AppRoot: View {
             ReportListView(fileStore: fileStore)
                 .tabItem { Label("报告", systemImage: "chart.xyaxis.line") }
 
-            SettingsView(fileStore: fileStore, permissions: permissions)
-                .tabItem { Label("设置", systemImage: "gearshape.fill") }
+            SettingsView(
+                fileStore: fileStore,
+                permissions: permissions,
+                healthKit: healthKit
+            )
+            .tabItem { Label("设置", systemImage: "gearshape.fill") }
         }
         .tint(Theme.accent)
     }

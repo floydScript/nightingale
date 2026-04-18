@@ -4,20 +4,40 @@ import AVFoundation
 import Combine
 
 struct SessionDetailView: View {
-
     let session: SleepSession
     let fileStore: AudioFileStore
 
     @StateObject private var player = SimpleAudioPlayer()
+    /// 正在播放的事件 ID；nil 表示播整夜音频或未在播。
+    @State private var selectedEventID: UUID?
+    @State private var isPlayingFullNight = false
 
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 18) {
                     header
-                    metaCard
-                    playerCard
+                    metricsGrid
+
+                    sectionTitle("睡眠分期")
+                    SleepStageChart(session: session)
+
+                    sectionTitle("心率")
+                    HeartRateChart(session: session)
+
+                    sectionTitle("血氧")
+                    SpO2Chart(session: session)
+
+                    sectionTitle("打呼时间轴")
+                    SnoreTimelineChart(session: session)
+
+                    sectionTitle("事件列表")
+                    eventList
+
+                    sectionTitle("整夜音频")
+                    fullNightPlayer
+
                     Spacer().frame(height: 30)
                 }
                 .padding(.horizontal, Theme.padding)
@@ -28,6 +48,8 @@ struct SessionDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onDisappear { player.stop() }
     }
+
+    // MARK: - Subviews
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -40,60 +62,166 @@ struct SessionDetailView: View {
         }
     }
 
-    private var metaCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            row(label: "开始", value: session.startTime.formatted(date: .omitted, time: .shortened))
-            row(label: "结束", value: session.endTime?.formatted(date: .omitted, time: .shortened) ?? "—")
-            row(label: "存档", value: session.isArchived ? "已归档" : "7 天内自动清理整夜音频")
+    private var metricsGrid: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+            metricCard(label: "时长", value: TimeFormat.duration(session.durationSeconds))
+            metricCard(label: "打呼次数", value: "\(session.snoreCount)")
+            metricCard(
+                label: "平均心率",
+                value: session.averageHeartRate.map { String(format: "%.0f BPM", $0) } ?? "—"
+            )
+            metricCard(
+                label: "最低 SpO₂",
+                value: session.minSpO2.map { String(format: "%.1f%%", $0) } ?? "—"
+            )
         }
-        .padding()
+    }
+
+    private func metricCard(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).font(.caption).foregroundStyle(Theme.textSecondary)
+            Text(value).font(.title3).bold().foregroundStyle(Theme.textPrimary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.headline)
+            .foregroundStyle(Theme.textPrimary)
+            .padding(.top, 6)
     }
 
     @ViewBuilder
-    private var playerCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("整夜音频").font(.headline).foregroundStyle(Theme.textPrimary)
-
-            if let relative = session.fullAudioPath,
-               FileManager.default.fileExists(atPath: fileStore.url(fromRelativePath: relative).path) {
-                HStack(spacing: 14) {
-                    Button {
-                        if player.isPlaying { player.pause() }
-                        else { player.play(url: fileStore.url(fromRelativePath: relative)) }
-                    } label: {
-                        Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 48))
-                            .foregroundStyle(Theme.accent)
-                    }
-                    .buttonStyle(.plain)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(player.isPlaying ? "播放中" : "点击播放")
-                            .foregroundStyle(Theme.textPrimary)
-                        Text(TimeFormat.duration(player.currentTime))
-                            .font(.system(.subheadline, design: .monospaced))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    Spacer()
+    private var eventList: some View {
+        let events = session.events.sorted { $0.timestamp > $1.timestamp }
+        if events.isEmpty {
+            Text("本晚未检测到事件。")
+                .font(.footnote)
+                .foregroundStyle(Theme.textTertiary)
+                .padding(.vertical, 8)
+        } else {
+            VStack(spacing: 8) {
+                ForEach(events) { event in
+                    EventRow(
+                        event: event,
+                        isPlaying: player.isPlaying && selectedEventID == event.id,
+                        clipAvailable: clipExists(for: event),
+                        onTap: { handleEventTap(event) }
+                    )
                 }
-            } else {
-                Text("整夜音频已被清理或尚未保存完成。")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.textTertiary)
             }
         }
-        .padding()
-        .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
     }
 
-    private func row(label: String, value: String) -> some View {
-        HStack {
-            Text(label).foregroundStyle(Theme.textSecondary)
+    @ViewBuilder
+    private var fullNightPlayer: some View {
+        if let relative = session.fullAudioPath,
+           FileManager.default.fileExists(atPath: fileStore.url(fromRelativePath: relative).path) {
+            HStack(spacing: 14) {
+                Button {
+                    handleFullNightTap(url: fileStore.url(fromRelativePath: relative))
+                } label: {
+                    Image(systemName: isPlayingFullNight && player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isPlayingFullNight && player.isPlaying ? "播放中" : "点击播放整夜")
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(isPlayingFullNight ? TimeFormat.duration(player.currentTime) : "—")
+                        .font(.system(.subheadline, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer()
+            }
+            .padding()
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        } else {
+            Text("整夜音频已被清理或尚未保存完成。")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textTertiary)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        }
+    }
+
+    // MARK: - Tap handlers
+
+    private func handleEventTap(_ event: SleepEvent) {
+        guard let path = event.clipPath else { return }
+        let url = fileStore.url(fromRelativePath: path)
+        if selectedEventID == event.id, player.isPlaying {
+            player.pause()
+        } else {
+            selectedEventID = event.id
+            isPlayingFullNight = false
+            player.play(url: url)
+        }
+    }
+
+    private func handleFullNightTap(url: URL) {
+        if isPlayingFullNight, player.isPlaying {
+            player.pause()
+        } else {
+            selectedEventID = nil
+            isPlayingFullNight = true
+            player.play(url: url)
+        }
+    }
+
+    private func clipExists(for event: SleepEvent) -> Bool {
+        guard let path = event.clipPath else { return false }
+        return FileManager.default.fileExists(atPath: fileStore.url(fromRelativePath: path).path)
+    }
+}
+
+private struct EventRow: View {
+    let event: SleepEvent
+    let isPlaying: Bool
+    let clipAvailable: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: isPlaying ? "pause.circle.fill" : (clipAvailable ? "play.circle.fill" : "waveform"))
+                .font(.system(size: 28))
+                .foregroundStyle(clipAvailable ? Theme.accent : Theme.textTertiary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(eventLabel)
+                    .foregroundStyle(Theme.textPrimary)
+                    .font(.subheadline).bold()
+                Text(event.timestamp.formatted(date: .omitted, time: .standard))
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
             Spacer()
-            Text(value).foregroundStyle(Theme.textPrimary).font(.system(.body, design: .monospaced))
+            Text(String(format: "%.0fs · %.0f%%", event.duration, event.confidence * 100))
+                .font(.caption.monospaced())
+                .foregroundStyle(Theme.textTertiary)
+        }
+        .padding(12)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .opacity(clipAvailable ? 1 : 0.55)
+    }
+
+    private var eventLabel: String {
+        switch event.type {
+        case .snore: "打呼"
+        case .sleepTalk: "梦话"
+        case .suspectedApnea: "疑似呼吸暂停"
+        case .nightmareSpike: "夜惊"
         }
     }
 }
@@ -107,6 +235,7 @@ final class SimpleAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate
     private var timer: Timer?
 
     func play(url: URL) {
+        stop()
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
@@ -131,6 +260,7 @@ final class SimpleAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate
         avPlayer?.stop()
         avPlayer = nil
         isPlaying = false
+        currentTime = 0
         stopTimer()
     }
 

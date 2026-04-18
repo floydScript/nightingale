@@ -3,13 +3,14 @@ import Foundation
 /// 管理录音文件在沙盒中的路径与清理。
 /// 声明为 `nonisolated` 因为这是纯文件 IO，需要从任意 context 调用
 /// （录音回调、测试、MainActor UI 等）。
-nonisolated final class AudioFileStore {
+nonisolated final class AudioFileStore: @unchecked Sendable {
 
     private let baseDirectory: URL
 
     init(baseDirectory: URL) {
         self.baseDirectory = baseDirectory
         ensureDirectoryExists(recordingsDirectory)
+        ensureDirectoryExists(clipsDirectory)
     }
 
     /// 用默认 Documents 初始化。生产代码调用这个。
@@ -23,9 +24,19 @@ nonisolated final class AudioFileStore {
         baseDirectory.appendingPathComponent("Recordings", isDirectory: true)
     }
 
+    /// 事件片段目录（Phase 1B 新增）。
+    var clipsDirectory: URL {
+        baseDirectory.appendingPathComponent("Clips", isDirectory: true)
+    }
+
     /// 某个 session 的整夜音频 URL。
     func fullRecordingURL(for sessionID: UUID) -> URL {
         recordingsDirectory.appendingPathComponent("\(sessionID.uuidString).m4a")
+    }
+
+    /// 某个 event 的 clip URL。
+    func clipURL(for eventID: UUID) -> URL {
+        clipsDirectory.appendingPathComponent("\(eventID.uuidString).m4a")
     }
 
     /// 从相对路径还原成绝对 URL。
@@ -42,17 +53,9 @@ nonisolated final class AudioFileStore {
         return url.path
     }
 
-    /// 当前录音目录总占用字节数。
+    /// 当前录音目录总占用字节数（含 clips 目录）。
     func totalBytesUsed() -> Int64 {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: recordingsDirectory,
-            includingPropertiesForKeys: [.fileSizeKey]
-        ) else { return 0 }
-
-        return files.reduce(Int64(0)) { sum, url in
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            return sum + Int64(size)
-        }
+        bytesIn(recordingsDirectory) + bytesIn(clipsDirectory)
     }
 
     /// 清理超过 N 天未修改的整夜录音。保留 archivedIDs 里的文件。返回被删除的 session ID 列表。
@@ -78,6 +81,19 @@ nonisolated final class AudioFileStore {
             }
         }
         return removed
+    }
+
+    // MARK: - Private
+
+    private func bytesIn(_ directory: URL) -> Int64 {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return 0 }
+        return files.reduce(Int64(0)) { sum, url in
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return sum + Int64(size)
+        }
     }
 
     private func ensureDirectoryExists(_ url: URL) {
