@@ -183,7 +183,7 @@ class SleepEvent {
 class SensorSample {
     var session: SleepSession?
     var timestamp: Date
-    var kind: SensorKind  // .heartRate / .hrv / .spo2 / .sleepStage / .temperature
+    var kind: SensorKind  // .heartRate / .hrv / .spo2 / .sleepStage / .temperature / .bodyMovement
     var value: Double
     var stringValue: String?  // 分期名称等
 }
@@ -197,7 +197,7 @@ enum SensorKind: String, Codable { case heartRate, hrv, spo2, sleepStage, temper
 ```
 Documents/
 ├── Recordings/
-│   ├── 2026-04-17.m4a       // 整夜音频，AAC 64 kbps 单声道 16kHz，~50 MB/晚
+│   ├── 2026-04-17.m4a       // 整夜音频，AAC 32 kbps 单声道 16 kHz，~110 MB/8h
 │   ├── 2026-04-16.m4a
 │   └── ...（最多保留 7 份）
 ├── Clips/
@@ -209,9 +209,11 @@ Documents/
 
 | 类别 | 单位大小 | 节奏 | 占用 |
 |---|---|---|---|
-| 整夜音频 | ~50 MB | 每天 1 份，保留 7 天 | ~350 MB 稳态 |
-| 事件片段 | ~300 KB/个 | 平均 30 事件/晚 | ~9 MB/晚 → 3 GB/年 |
+| 整夜音频 | ~110 MB | 每天 1 份，保留 7 天 | ~770 MB 稳态 |
+| 事件片段 | ~250 KB/个（60 秒均值） | 平均 30 事件/晚 | ~7-8 MB/晚 → 2.5 GB/年 |
 | 结构化数据 | <100 KB/晚 | 永久 | 可忽略 |
+
+> **取舍说明**：32 kbps AAC 足以清晰回放打呼与梦话（语音可懂度阈值 ≈ 16 kbps）；16 kHz 采样率舍弃了 8 kHz 以上高频，对鼾声识别无影响。如未来存储紧张，可降至 24 kbps 再省 25%。
 
 用户可在**设置页**随时查看当前占用和清理旧事件。
 
@@ -260,7 +262,7 @@ Documents/
   - 打呼总次数、总时长、最长单次
 - [ ] **事件列表**：点击任一打呼事件可回放 15 秒片段
 - [ ] **自动清理**：7 天前的整夜音频自动删（事件片段保留）
-- [ ] **设置页**（极简版）：权限状态、存储占用、一键清空
+- [ ] **设置页**（极简版）：权限状态、存储占用、一键清空、**免费开发者证书剩余天数提示**（超过 5 天未重新部署时首页 banner 预警）
 
 #### 不在 Phase 1 的
 - 梦话检测（Phase 2）
