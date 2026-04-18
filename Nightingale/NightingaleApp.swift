@@ -1,32 +1,47 @@
-//
-//  NightingaleApp.swift
-//  Nightingale
-//
-//  Created by eason-air on 2026/4/18.
-//
-
 import SwiftUI
 import SwiftData
 
 @main
 struct NightingaleApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
+    let modelContainer: ModelContainer
+    let fileStore: AudioFileStore
+    let permissions: PermissionManager
+    let recorderController: RecorderController
+
+    init() {
+        let schema = Schema([SleepSession.self])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        let container: ModelContainer
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            container = try ModelContainer(for: schema, configurations: [config])
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            fatalError("Failed to create SwiftData container: \(error)")
         }
-    }()
+
+        let store = AudioFileStore()
+        let perms = PermissionManager()
+        let rc = RecorderController(
+            modelContext: container.mainContext,
+            fileStore: store,
+            permissions: perms
+        )
+
+        self.modelContainer = container
+        self.fileStore = store
+        self.permissions = perms
+        self.recorderController = rc
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppRoot(
+                fileStore: fileStore,
+                permissions: permissions,
+                controller: recorderController
+            )
+            .modelContainer(modelContainer)
+            .preferredColorScheme(.dark)
         }
-        .modelContainer(sharedModelContainer)
     }
 }
