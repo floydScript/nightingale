@@ -75,12 +75,19 @@ nonisolated final class SleepTalkTranscriber: @unchecked Sendable {
 
         NSLog("SleepTalkTranscriber: dispatching recognition task (on-device, locale=\(recognizer.locale.identifier))")
 
+        let startTime = Date()
         let result: String? = await withCheckedContinuation { cont in
             let request = SFSpeechURLRecognitionRequest(url: url)
             request.requiresOnDeviceRecognition = true
-            request.shouldReportPartialResults = false
+            // 开 partial 让 recognizer 把中间识别到的字不断送回来。诊断用：
+            // 若 partial 出过非空而 final 变空，说明识别了但 finalizer 吞了；
+            // 若 partial 始终空，说明音频本身未被识别到任何 token。
+            request.shouldReportPartialResults = true
+            request.addsPunctuation = true
 
             let state = ResumeGuard()
+            var lastPartial = ""
+            var partialCount = 0
 
             let task = recognizer.recognitionTask(with: request) { result, error in
                 if let error {
@@ -90,11 +97,23 @@ nonisolated final class SleepTalkTranscriber: @unchecked Sendable {
                     return
                 }
                 guard let result else { return }
-                if result.isFinal {
-                    let text = result.bestTranscription.formattedString
-                    NSLog("SleepTalkTranscriber: final text=\"\(text)\" empty=\(text.isEmpty)")
-                    state.resume(with: text.isEmpty ? nil : text, cont: cont)
+
+                let text = result.bestTranscription.formattedString
+
+                if !result.isFinal {
+                    partialCount += 1
+                    if text != lastPartial {
+                        NSLog("SleepTalkTranscriber: partial[\(partialCount)]=\"\(text)\"")
+                        lastPartial = text
+                    }
+                    return
                 }
+
+                // final：若 text 为空但中间有过非空 partial，用最后一次 partial 作为结果（iOS 奇葩行为兜底）
+                let elapsed = Date().timeIntervalSince(startTime)
+                let chosen = !text.isEmpty ? text : lastPartial
+                NSLog("SleepTalkTranscriber: final text=\"\(text)\" lastPartial=\"\(lastPartial)\" chosen=\"\(chosen)\" elapsed=\(String(format: "%.2f", elapsed))s")
+                state.resume(with: chosen.isEmpty ? nil : chosen, cont: cont)
             }
 
             // Timeout safety net.
