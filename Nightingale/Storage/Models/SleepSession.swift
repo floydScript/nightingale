@@ -11,6 +11,18 @@ final class SleepSession {
     var morningMood: String?
     var morningNote: String?
 
+    // MARK: - Phase 3
+
+    /// JSON-encoded `[String]` 标签数组。存 raw String 避免 SwiftData 对 [String] 的
+    /// 迁移抖动；通过计算属性 `tags` 读写。旧记录默认空 "[]"。
+    var tagsRaw: String = "[]"
+
+    /// 环境噪音整夜平均 dB（相对 RMS）。nil 表示未采集。
+    var ambientNoiseAverageDB: Double?
+
+    /// 环境噪音整夜峰值 dB。nil 表示未采集。
+    var ambientNoisePeakDB: Double?
+
     @Relationship(deleteRule: .cascade, inverse: \SleepEvent.session)
     var events: [SleepEvent] = []
 
@@ -58,5 +70,25 @@ final class SleepSession {
 
     var maxHeartRate: Double? {
         sensorSamples.filter { $0.kind == .heartRate }.map(\.value).max()
+    }
+
+    // MARK: - Phase 3 · 标签访问器
+
+    /// 读写 JSON 编码的标签数组。读失败返回 []；写失败保留旧值。
+    var tags: [String] {
+        get {
+            guard let data = tagsRaw.data(using: .utf8),
+                  let arr = try? JSONDecoder().decode([String].self, from: data) else {
+                return []
+            }
+            return arr
+        }
+        set {
+            let unique = Array(NSOrderedSet(array: newValue)) as? [String] ?? newValue
+            if let data = try? JSONEncoder().encode(unique),
+               let s = String(data: data, encoding: .utf8) {
+                tagsRaw = s
+            }
+        }
     }
 }

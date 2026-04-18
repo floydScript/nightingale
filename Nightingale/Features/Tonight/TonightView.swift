@@ -4,19 +4,60 @@ struct TonightView: View {
 
     @ObservedObject var controller: RecorderController
 
+    /// 证书 banner 本地关闭状态（只管本次 app 生命周期，重启会再弹）。
+    @State private var dismissedCertWarning = false
+
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
-            VStack(spacing: 32) {
-                Spacer()
-                headline
-                Spacer()
-                bigButton
-                subtitle
-                Spacer().frame(height: 60)
+            VStack(spacing: 20) {
+                if showCertBanner {
+                    certBanner.padding(.horizontal, Theme.padding)
+                }
+                VStack(spacing: 32) {
+                    Spacer()
+                    headline
+                    Spacer()
+                    bigButton
+                    subtitle
+                    Spacer().frame(height: 60)
+                }
+                .padding(.horizontal, Theme.padding)
             }
-            .padding(.horizontal, Theme.padding)
         }
+    }
+
+    // MARK: Phase 1 Tail · T1.2 证书 banner
+
+    private var showCertBanner: Bool {
+        CertExpiry.shouldWarnOnHome() && !dismissedCertWarning
+    }
+
+    private var certBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.35))
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("证书即将过期（\(CertExpiry.shortStatus())）")
+                    .font(.subheadline).bold()
+                    .foregroundStyle(Theme.textPrimary)
+                Text("请将手机插回 Mac 重新部署，否则明晚 app 可能无法启动。")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Spacer()
+            Button {
+                dismissedCertWarning = true
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .background(Color(red: 0.30, green: 0.23, blue: 0.10))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
     }
 
     @ViewBuilder
@@ -27,7 +68,7 @@ struct TonightView: View {
                 Text("准备就绪")
                     .font(.title).bold()
                     .foregroundStyle(Theme.textPrimary)
-                Text("把手机放在床头，屏幕朝下，插上电源")
+                Text("把手机放在床头，屏幕朝下,插上电源")
                     .font(.subheadline)
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)

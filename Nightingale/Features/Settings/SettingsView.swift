@@ -24,6 +24,35 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Theme.surface)
 
+                    Section("证书") {
+                        HStack {
+                            Text("免费开发者证书")
+                                .foregroundStyle(Theme.textPrimary)
+                            Spacer()
+                            Text(CertExpiry.shortStatus())
+                                .foregroundStyle(certColor)
+                                .font(.subheadline.monospaced())
+                        }
+                        Text("免费 Apple ID 签的 app 7 天后需要重新部署。如已少于 2 天，请提前把手机插回 Mac 重跑一次。")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    .listRowBackground(Theme.surface)
+
+                    Section("智能闹钟") {
+                        NavigationLink {
+                            AlarmView()
+                        } label: {
+                            HStack {
+                                Image(systemName: "alarm.fill")
+                                    .foregroundStyle(Theme.accent)
+                                Text("闹钟设置")
+                                    .foregroundStyle(Theme.textPrimary)
+                            }
+                        }
+                    }
+                    .listRowBackground(Theme.surface)
+
                     Section("存储") {
                         row(label: "录音文件", value: bytesText(storageBytes))
                         row(label: "记录数", value: "\(sessions.count)")
@@ -40,7 +69,7 @@ struct SettingsView: View {
                     .listRowBackground(Theme.surface)
 
                     Section("版本") {
-                        row(label: "Nightingale", value: "Phase 1B")
+                        row(label: "Nightingale", value: "Phase 3")
                     }
                     .listRowBackground(Theme.surface)
                 }
@@ -57,6 +86,15 @@ struct SettingsView: View {
             } message: {
                 Text("所有整夜录音文件和 session 记录会被永久删除，不可恢复。")
             }
+        }
+    }
+
+    private var certColor: Color {
+        guard let d = CertExpiry.remainingDays() else { return Theme.textTertiary }
+        switch d {
+        case 0...2: return Theme.danger
+        case 3...4: return Color(red: 1.0, green: 0.85, blue: 0.35)
+        default: return Theme.accent
         }
     }
 

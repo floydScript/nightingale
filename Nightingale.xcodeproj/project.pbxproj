@@ -405,8 +405,9 @@
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nightingale 使用本地语音识别把夜间的梦话转写成文字，方便你起床翻阅。识别过程不联网，数据不离开你的 iPhone。";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "Nightingale 需要读取 Apple Watch 记录的心率 / 血氧 / 睡眠分期，用于生成完整睡眠报告。数据仅存本地，不上传。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = "com.floydscript.nightingale.cleanup";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
+				INFOPLIST_KEY_UIBackgroundModes = "audio processing";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -442,8 +443,9 @@
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nightingale 使用本地语音识别把夜间的梦话转写成文字，方便你起床翻阅。识别过程不联网，数据不离开你的 iPhone。";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "Nightingale 需要读取 Apple Watch 记录的心率 / 血氧 / 睡眠分期，用于生成完整睡眠报告。数据仅存本地，不上传。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = "com.floydscript.nightingale.cleanup";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
+				INFOPLIST_KEY_UIBackgroundModes = "audio processing";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

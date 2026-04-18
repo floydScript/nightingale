@@ -30,6 +30,9 @@ final class RecorderController: ObservableObject {
     private var talkDebouncer = SleepTalkDebouncer()
     private var talkTask: Task<Void, Never>?
 
+    // 环境噪音监控（Phase 3 · P3.6）
+    private var noiseMonitor: NoiseMonitor?
+
     init(
         modelContext: ModelContext,
         fileStore: AudioFileStore,
@@ -53,7 +56,7 @@ final class RecorderController: ObservableObject {
         }
     }
 
-    /// 开始录音。未授权自动请求。会同时启动 SnoreDetector + SleepTalkDetector。
+    /// 开始录音。未授权自动请求。会同时启动 SnoreDetector + SleepTalkDetector + NoiseMonitor。
     func start() async {
         guard case .idle = state else { return }
 
@@ -76,13 +79,16 @@ final class RecorderController: ObservableObject {
             let format = recorder.inputFormat
             startSnoreDetector(format: format)
             startSleepTalkDetector(format: format)
+            let noise = NoiseMonitor()
+            self.noiseMonitor = noise
 
-            // 3. 启动录音引擎，把 detector.feed 挂到 tap 回调；同一个 buffer fan-out 到两个 detector
+            // 3. 启动录音引擎，把 detector.feed 挂到 tap 回调；同一个 buffer fan-out 到三个 sink
             let snore = snoreDetector
             let talk = talkDetector
             let observer: AudioRecorder.BufferObserver? = { buffer, frame in
                 snore?.feed(buffer, atFrame: frame)
                 talk?.feed(buffer, atFrame: frame)
+                noise.feed(buffer)
             }
             try recorder.start(writingTo: url, bufferObserver: observer)
             session.fullAudioPath = fileStore.relativePath(for: url)
@@ -115,6 +121,9 @@ final class RecorderController: ObservableObject {
         if let last = talkDebouncer.flush() {
             emitSleepTalkEvent(last)
         }
+        // 抓 noise summary 前先停录音（buffer tap 里还会再 feed 一轮，没关系）
+        let noiseSummary = noiseMonitor?.snapshot()
+        noiseMonitor?.stop()
         teardownDetectors()
 
         do {
@@ -125,6 +134,10 @@ final class RecorderController: ObservableObject {
 
         if let session = currentSession {
             session.endTime = Date()
+            if let summary = noiseSummary {
+                session.ambientNoiseAverageDB = summary.averageDB
+                session.ambientNoisePeakDB = summary.peakDB
+            }
             do {
                 try modelContext.save()
             } catch {
@@ -189,6 +202,8 @@ final class RecorderController: ObservableObject {
         talkTask?.cancel()
         talkTask = nil
         talkDetector = nil
+
+        noiseMonitor = nil
     }
 
     // MARK: - Event emission
@@ -245,6 +260,18 @@ final class RecorderController: ObservableObject {
         try? modelContext.save()
     }
 
+    private func emitNightmareEvent(_ candidate: NightmareDetector.Candidate, session: SleepSession) {
+        let event = SleepEvent(
+            session: session,
+            timestamp: candidate.start,
+            duration: candidate.duration,
+            type: .nightmareSpike,
+            confidence: candidate.confidence
+        )
+        modelContext.insert(event)
+        try? modelContext.save()
+    }
+
     // MARK: - Async post-processing
 
     private func postProcess(session: SleepSession) async {
@@ -264,6 +291,10 @@ final class RecorderController: ObservableObject {
         // 2. 疑似呼吸暂停检测（需在有 SpO2 样本之后、在剪片段之前，
         //    这样新插入的 apnea 事件也能被 clip extraction 剪出片段）
         runApneaDetection(session: session)
+
+        // 2.5 夜惊检测（Phase 3 · P3.5）。基于刚拉到的 HR + sleepStage，
+        //     在 clip extraction 之前跑，让新事件也剪出片段。
+        runNightmareDetection(session: session)
 
         // 3. 剪片段
         guard let relPath = session.fullAudioPath else { return }
@@ -324,6 +355,39 @@ final class RecorderController: ObservableObject {
             emitApneaEvent(c, session: session)
         }
         NSLog("Apnea detection produced \(candidates.count) candidate(s)")
+    }
+
+    /// 纯函数式夜惊判定。输入是 HR + sleepStage 样本，输出新 SleepEvent(nightmareSpike)。
+    private func runNightmareDetection(session: SleepSession) {
+        let hrSamples = session.sensorSamples
+            .filter { $0.kind == .heartRate }
+            .map { NightmareDetector.HRSample(timestamp: $0.timestamp, bpm: $0.value) }
+
+        let stageSegments = session.sensorSamples
+            .filter { $0.kind == .sleepStage }
+            .compactMap { s -> NightmareDetector.StageSegment? in
+                guard let sv = s.stringValue else { return nil }
+                let parts = sv.split(separator: "|").map(String.init)
+                let stage = parts.first ?? "unknown"
+                var end = s.timestamp.addingTimeInterval(60)
+                if let endPart = parts.first(where: { $0.hasPrefix("end=") }),
+                   let epoch = Double(endPart.dropFirst(4)) {
+                    end = Date(timeIntervalSince1970: epoch)
+                }
+                return NightmareDetector.StageSegment(start: s.timestamp, end: end, stage: stage)
+            }
+
+        guard !hrSamples.isEmpty, !stageSegments.isEmpty else {
+            NSLog("Skipping nightmare detection: missing HR or stage samples")
+            return
+        }
+
+        let detector = NightmareDetector()
+        let candidates = detector.detect(.init(hrSamples: hrSamples, stageSegments: stageSegments))
+        for c in candidates {
+            emitNightmareEvent(c, session: session)
+        }
+        NSLog("Nightmare detection produced \(candidates.count) candidate(s)")
     }
 
     // MARK: - Tick / interruption

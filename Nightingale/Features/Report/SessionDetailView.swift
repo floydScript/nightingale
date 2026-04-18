@@ -19,13 +19,23 @@ struct SessionDetailView: View {
     // 控制 onChange 初始化时不触发保存
     @State private var didHydrate = false
 
+    // Phase 3 标签编辑缓冲
+    @State private var tagsDraft: [String] = []
+
+    // Phase 3 PDF 导出 URL（nil 表示未生成）
+    @State private var pdfURL: URL?
+
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     header
+                    if showNoiseBanner {
+                        noiseBanner
+                    }
                     morningCheckIn
+                    tagsSection
                     metricsGrid
 
                     sectionTitle("综合时间轴")
@@ -48,6 +58,8 @@ struct SessionDetailView: View {
 
                     sectionTitle("整夜音频")
                     fullNightPlayer
+
+                    exportPDFButton
 
                     archiveButton
 
@@ -74,6 +86,35 @@ struct SessionDetailView: View {
                 .font(.system(size: 34, weight: .bold, design: .monospaced))
                 .foregroundStyle(Theme.accent)
         }
+    }
+
+    // MARK: Phase 3 · 噪音 banner
+
+    private var showNoiseBanner: Bool {
+        guard let avg = session.ambientNoiseAverageDB else { return false }
+        return (100 + avg) > NoiseMonitor.highNoiseRelativeThreshold
+    }
+
+    private var noiseBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "speaker.wave.3.fill")
+                .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.35))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("外界干扰较大")
+                    .font(.subheadline).bold()
+                    .foregroundStyle(Theme.textPrimary)
+                if let avg = session.ambientNoiseAverageDB {
+                    Text(String(format: "整夜平均 %.0f dB（相对），可能影响睡眠深度。",
+                                100 + avg))
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(Color(red: 0.30, green: 0.23, blue: 0.10))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
     }
 
     // MARK: Phase 2 · 晨间打卡
@@ -123,9 +164,31 @@ struct SessionDetailView: View {
         .onChange(of: noteDraft) { _, _ in persistMorningInputsIfHydrated() }
     }
 
+    // MARK: Phase 3 · 标签
+
+    private var tagsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("标签")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+            TagChipEditor(tags: $tagsDraft)
+        }
+        .padding()
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        .onChange(of: tagsDraft) { _, newValue in
+            guard didHydrate else { return }
+            if session.tags != newValue {
+                session.tags = newValue
+                try? modelContext.save()
+            }
+        }
+    }
+
     private func hydrateDrafts() {
         moodDraft = session.morningMood ?? ""
         noteDraft = session.morningNote ?? ""
+        tagsDraft = session.tags
         didHydrate = true
     }
 
@@ -155,6 +218,14 @@ struct SessionDetailView: View {
             metricCard(
                 label: "最低 SpO₂",
                 value: session.minSpO2.map { String(format: "%.1f%%", $0) } ?? "—"
+            )
+            metricCard(
+                label: "平均噪音",
+                value: session.ambientNoiseAverageDB.map { String(format: "%.0f dB", 100 + $0) } ?? "—"
+            )
+            metricCard(
+                label: "峰值噪音",
+                value: session.ambientNoisePeakDB.map { String(format: "%.0f dB", 100 + $0) } ?? "—"
             )
         }
     }
@@ -233,6 +304,49 @@ struct SessionDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        }
+    }
+
+    // MARK: Phase 3 · 导出 PDF
+
+    @ViewBuilder
+    private var exportPDFButton: some View {
+        if let url = pdfURL {
+            ShareLink(item: url) {
+                HStack {
+                    Image(systemName: "square.and.arrow.up")
+                    Text("分享 PDF 报告").bold()
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                }
+                .padding()
+                .background(Theme.accent.opacity(0.2))
+                .foregroundStyle(Theme.accent)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button {
+                generatePDF()
+            } label: {
+                HStack {
+                    Image(systemName: "doc.richtext")
+                    Text("导出 PDF 报告").bold()
+                    Spacer()
+                }
+                .padding()
+                .background(Theme.surface)
+                .foregroundStyle(Theme.textPrimary)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func generatePDF() {
+        let renderer = ReportPDFRenderer()
+        if let url = renderer.render(session: session) {
+            pdfURL = url
         }
     }
 

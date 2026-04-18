@@ -4,6 +4,7 @@ import Charts
 
 /// 趋势 Tab：近 7 / 30 / 90 天的跨夜聚合图表。
 /// 全部基于已入库的 SleepSession / SleepEvent / SensorSample，不做新的存储。
+/// Phase 3 · P3.4：支持按标签多选筛选。
 struct TrendsView: View {
 
     enum Window: Int, CaseIterable, Identifiable {
@@ -22,6 +23,7 @@ struct TrendsView: View {
     @Query(sort: \SleepSession.startTime, order: .reverse) private var sessions: [SleepSession]
 
     @State private var window: Window = .week
+    @State private var selectedTags: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -30,6 +32,10 @@ struct TrendsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         windowPicker
+
+                        if !allTags.isEmpty {
+                            tagFilterSection
+                        }
 
                         let filtered = sessionsInWindow()
                         if filtered.isEmpty {
@@ -62,12 +68,56 @@ struct TrendsView: View {
         .pickerStyle(.segmented)
     }
 
+    // MARK: - Tag filter (P3.4)
+
+    private var allTags: [String] {
+        let set = sessions.reduce(into: Set<String>()) { partial, s in
+            partial.formUnion(s.tags)
+        }
+        return set.sorted()
+    }
+
+    private var tagFilterSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("按标签筛选")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                if !selectedTags.isEmpty {
+                    Button("清空") { selectedTags.removeAll() }
+                        .font(.caption)
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(allTags, id: \.self) { tag in
+                        let active = selectedTags.contains(tag)
+                        Button {
+                            if active { selectedTags.remove(tag) } else { selectedTags.insert(tag) }
+                        } label: {
+                            Text(tag)
+                                .font(.footnote)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(active ? Theme.accent : Theme.surface)
+                                .foregroundStyle(active ? Color.black : Theme.textPrimary)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
     private var emptyState: some View {
         VStack(alignment: .center, spacing: 10) {
             Image(systemName: "chart.line.uptrend.xyaxis")
                 .font(.system(size: 36))
                 .foregroundStyle(Theme.textTertiary)
-            Text("还没有足够的记录")
+            Text(selectedTags.isEmpty ? "还没有足够的记录" : "所选标签下没有数据")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -247,7 +297,15 @@ struct TrendsView: View {
             to: startOfDay(Date())
         ) ?? Date.distantPast
         return sessions
-            .filter { $0.startTime >= cutoff }
+            .filter { s in
+                guard s.startTime >= cutoff else { return false }
+                // 标签筛选：若有选中，只保留含有任一选中标签的 session
+                if !selectedTags.isEmpty {
+                    let tagSet = Set(s.tags)
+                    if tagSet.intersection(selectedTags).isEmpty { return false }
+                }
+                return true
+            }
             .sorted { $0.startTime < $1.startTime }
     }
 

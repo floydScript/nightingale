@@ -19,6 +19,7 @@ struct ArchiveView: View {
 
     @State private var filter: EventFilter = .all
     @State private var selectedEvent: SleepEvent?
+    @State private var searchQuery: String = ""
 
     enum EventFilter: Hashable, CaseIterable {
         case all, snore, sleepTalk, apnea, nightmare
@@ -51,7 +52,9 @@ struct ArchiveView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        searchBar
                         filterBar
+                        wordCloudLink
 
                         if !archivedSessions.isEmpty {
                             sectionTitle("已归档的夜晚")
@@ -94,6 +97,31 @@ struct ArchiveView: View {
 
     // MARK: - Subviews
 
+    /// Phase 3 P3.3：梦话关键词搜索
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Theme.textTertiary)
+            TextField("搜索梦话转写", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .foregroundStyle(Theme.textPrimary)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            if !searchQuery.isEmpty {
+                Button {
+                    searchQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(10)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
     private var filterBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -115,6 +143,28 @@ struct ArchiveView: View {
         }
     }
 
+    /// Phase 3 P3.7：跳转词云
+    private var wordCloudLink: some View {
+        NavigationLink {
+            WordCloudView()
+        } label: {
+            HStack {
+                Image(systemName: "cloud.fill")
+                    .foregroundStyle(Theme.accentSecondary)
+                Text("梦话词云")
+                    .foregroundStyle(Theme.textPrimary)
+                    .font(.subheadline).bold()
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(12)
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        }
+        .buttonStyle(.plain)
+    }
+
     private func sectionTitle(_ t: String) -> some View {
         Text(t).font(.headline).foregroundStyle(Theme.textPrimary).padding(.top, 4)
     }
@@ -124,7 +174,7 @@ struct ArchiveView: View {
             Image(systemName: "books.vertical")
                 .font(.system(size: 36))
                 .foregroundStyle(Theme.textTertiary)
-            Text(filter == .all ? "还没有记录到事件" : "当前筛选下没有事件")
+            Text(emptyMessage)
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -132,8 +182,29 @@ struct ArchiveView: View {
         .padding(.vertical, 30)
     }
 
+    private var emptyMessage: String {
+        if !searchQuery.isEmpty {
+            return "没有匹配「\(searchQuery)」的梦话。"
+        }
+        if filter == .all {
+            return "还没有记录到事件"
+        }
+        return "当前筛选下没有事件"
+    }
+
     private var filteredEvents: [SleepEvent] {
-        allEvents.filter { filter.matches($0) }
+        allEvents.filter { event in
+            guard filter.matches(event) else { return false }
+            // 搜索只作用在梦话 transcript 上
+            let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !query.isEmpty {
+                // 搜索模式下只看带转写的梦话事件
+                guard event.type == .sleepTalk,
+                      let t = event.transcript else { return false }
+                return t.localizedCaseInsensitiveContains(query)
+            }
+            return true
+        }
     }
 }
 
