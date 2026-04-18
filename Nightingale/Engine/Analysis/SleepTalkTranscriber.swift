@@ -9,77 +9,107 @@ import Foundation
 /// - 首次调用会触发权限请求
 /// - 识别使用中文（`zh-CN`），如设备不支持则降级到默认 locale
 /// - 不做实时流转写；Phase 2 只处理事件剪出来后的独立 clip
+///
+/// 诊断：每一步失败都 NSLog，方便在 Xcode console 里看"到底为什么没转写"。
 nonisolated final class SleepTalkTranscriber: @unchecked Sendable {
 
     private let recognizer: SFSpeechRecognizer?
-    /// 已申请过权限后缓存结果，避免每次都走异步 callback。
+    /// 已申请过权限后缓存结果。
     private var cachedAuthStatus: SFSpeechRecognizerAuthorizationStatus?
+    /// 单次识别的最长等待时间。避免 task 卡死无限挂起。
+    private let recognitionTimeoutSeconds: UInt64 = 30
 
     init(locale: Locale = Locale(identifier: "zh-CN")) {
-        // 优先中文识别；若系统不支持则 fallback 到用户首选 locale
-        self.recognizer = SFSpeechRecognizer(locale: locale)
-            ?? SFSpeechRecognizer()
+        let primary = SFSpeechRecognizer(locale: locale)
+        let final = primary ?? SFSpeechRecognizer()
+        self.recognizer = final
+
+        if let r = final {
+            NSLog("SleepTalkTranscriber init: locale=\(r.locale.identifier) isAvailable=\(r.isAvailable) supportsOnDevice=\(r.supportsOnDeviceRecognition)")
+        } else {
+            NSLog("SleepTalkTranscriber init: no recognizer available at all")
+        }
     }
 
     /// 转写一个音频文件。失败返回 nil（原始 clip 仍然保留，用户可播放）。
     /// 调用方应当已经判断事件类型为 `.sleepTalk`。
     func transcribe(url: URL) async -> String? {
-        // 预校验：文件存在 + 有音轨。
-        // 缺这一步时遇到 0-track 的退化 clip，SFSpeechURLRecognitionRequest 内部
-        // 会让 AVAssetReader 同步抛 Obj-C NSException（Swift 无法 catch 直接崩）。
+        NSLog("SleepTalkTranscriber: transcribe \(url.lastPathComponent) START")
+
+        // 预校验：文件存在 + 有音轨（防 AVAssetReader NSException 崩溃）。
         guard FileManager.default.fileExists(atPath: url.path) else {
-            NSLog("SleepTalkTranscriber: file does not exist: \(url.lastPathComponent)")
+            NSLog("SleepTalkTranscriber: file not found")
             return nil
         }
         let asset = AVURLAsset(url: url)
         do {
             let tracks = try await asset.loadTracks(withMediaType: .audio)
             guard !tracks.isEmpty else {
-                NSLog("SleepTalkTranscriber: clip has no audio tracks: \(url.lastPathComponent)")
+                NSLog("SleepTalkTranscriber: clip has 0 audio tracks")
                 return nil
             }
+            if let duration = try? await asset.load(.duration) {
+                NSLog("SleepTalkTranscriber: clip duration=\(String(format: "%.2f", duration.seconds))s")
+            }
         } catch {
-            NSLog("SleepTalkTranscriber: failed to load tracks from \(url.lastPathComponent): \(error)")
+            NSLog("SleepTalkTranscriber: failed to load tracks: \(error)")
             return nil
         }
 
-        guard await ensureAuthorized() else { return nil }
-        guard let recognizer, recognizer.isAvailable else {
-            NSLog("SleepTalkTranscriber: recognizer unavailable")
+        guard await ensureAuthorized() else {
+            NSLog("SleepTalkTranscriber: not authorized (status=\(authStatusString))")
+            return nil
+        }
+        guard let recognizer else {
+            NSLog("SleepTalkTranscriber: recognizer is nil")
+            return nil
+        }
+        guard recognizer.isAvailable else {
+            NSLog("SleepTalkTranscriber: recognizer not currently available (Siri/dictation maybe off)")
             return nil
         }
         guard recognizer.supportsOnDeviceRecognition else {
-            NSLog("SleepTalkTranscriber: on-device recognition not supported; skipping")
+            NSLog("SleepTalkTranscriber: on-device recognition NOT supported for locale \(recognizer.locale.identifier). Go to iPhone 设置 → 通用 → 键盘 → 听写：确保中文（普通话）已启用；必要时在 Siri 语言设置里选中文让其下载离线模型。")
             return nil
         }
 
-        return await withCheckedContinuation { cont in
+        NSLog("SleepTalkTranscriber: dispatching recognition task (on-device, locale=\(recognizer.locale.identifier))")
+
+        let result: String? = await withCheckedContinuation { cont in
             let request = SFSpeechURLRecognitionRequest(url: url)
             request.requiresOnDeviceRecognition = true
             request.shouldReportPartialResults = false
 
-            var hasResumed = false
-            let lock = NSLock()
-            func safeResume(_ value: String?) {
-                lock.lock(); defer { lock.unlock() }
-                guard !hasResumed else { return }
-                hasResumed = true
-                cont.resume(returning: value)
-            }
+            let state = ResumeGuard()
 
-            recognizer.recognitionTask(with: request) { result, error in
+            let task = recognizer.recognitionTask(with: request) { result, error in
                 if let error {
-                    NSLog("Speech recognition error: \(error)")
-                    safeResume(nil)
+                    let nsError = error as NSError
+                    NSLog("SleepTalkTranscriber: recognition error domain=\(nsError.domain) code=\(nsError.code) desc=\(nsError.localizedDescription)")
+                    state.resume(with: nil, cont: cont)
                     return
                 }
                 guard let result else { return }
                 if result.isFinal {
                     let text = result.bestTranscription.formattedString
-                    safeResume(text.isEmpty ? nil : text)
+                    NSLog("SleepTalkTranscriber: final text=\"\(text)\" empty=\(text.isEmpty)")
+                    state.resume(with: text.isEmpty ? nil : text, cont: cont)
+                }
+            }
+
+            // Timeout safety net.
+            Task {
+                try? await Task.sleep(nanoseconds: self.recognitionTimeoutSeconds * 1_000_000_000)
+                if !state.hasResumed() {
+                    NSLog("SleepTalkTranscriber: recognition timeout after \(self.recognitionTimeoutSeconds)s, canceling task")
+                    task.cancel()
+                    state.resume(with: nil, cont: cont)
                 }
             }
         }
+
+        NSLog("SleepTalkTranscriber: transcribe \(url.lastPathComponent) DONE result=\(result == nil ? "nil" : "\"\(result!)\"")")
+        return result
     }
 
     // MARK: - Permission
@@ -94,5 +124,38 @@ nonisolated final class SleepTalkTranscriber: @unchecked Sendable {
         }
         cachedAuthStatus = status
         return status == .authorized
+    }
+
+    private var authStatusString: String {
+        switch cachedAuthStatus {
+        case .some(.authorized): return "authorized"
+        case .some(.denied): return "denied"
+        case .some(.restricted): return "restricted"
+        case .some(.notDetermined): return "notDetermined"
+        case .some(let other): return "other(\(other.rawValue))"
+        case .none: return "unknown"
+        }
+    }
+}
+
+/// 保证 withCheckedContinuation 只 resume 一次的小状态盒。
+private nonisolated final class ResumeGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+
+    func hasResumed() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return resumed
+    }
+
+    func resume(with value: String?, cont: CheckedContinuation<String?, Never>) {
+        lock.lock()
+        if resumed {
+            lock.unlock()
+            return
+        }
+        resumed = true
+        lock.unlock()
+        cont.resume(returning: value)
     }
 }
