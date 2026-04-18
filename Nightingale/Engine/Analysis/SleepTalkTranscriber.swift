@@ -24,13 +24,31 @@ nonisolated final class SleepTalkTranscriber: @unchecked Sendable {
     /// 转写一个音频文件。失败返回 nil（原始 clip 仍然保留，用户可播放）。
     /// 调用方应当已经判断事件类型为 `.sleepTalk`。
     func transcribe(url: URL) async -> String? {
+        // 预校验：文件存在 + 有音轨。
+        // 缺这一步时遇到 0-track 的退化 clip，SFSpeechURLRecognitionRequest 内部
+        // 会让 AVAssetReader 同步抛 Obj-C NSException（Swift 无法 catch 直接崩）。
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            NSLog("SleepTalkTranscriber: file does not exist: \(url.lastPathComponent)")
+            return nil
+        }
+        let asset = AVURLAsset(url: url)
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard !tracks.isEmpty else {
+                NSLog("SleepTalkTranscriber: clip has no audio tracks: \(url.lastPathComponent)")
+                return nil
+            }
+        } catch {
+            NSLog("SleepTalkTranscriber: failed to load tracks from \(url.lastPathComponent): \(error)")
+            return nil
+        }
+
         guard await ensureAuthorized() else { return nil }
         guard let recognizer, recognizer.isAvailable else {
             NSLog("SleepTalkTranscriber: recognizer unavailable")
             return nil
         }
         guard recognizer.supportsOnDeviceRecognition else {
-            // Spec 明确要求强制 on-device，不做 fallback
             NSLog("SleepTalkTranscriber: on-device recognition not supported; skipping")
             return nil
         }
@@ -40,7 +58,6 @@ nonisolated final class SleepTalkTranscriber: @unchecked Sendable {
             request.requiresOnDeviceRecognition = true
             request.shouldReportPartialResults = false
 
-            // recognitionTask 的 callback 会被调用多次；我们只在 isFinal 或 error 时 resume 一次
             var hasResumed = false
             let lock = NSLock()
             func safeResume(_ value: String?) {
