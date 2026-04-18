@@ -4,8 +4,13 @@ import AVFoundation
 /// 低层录音引擎：把 AVAudioEngine 输入流写入 AAC m4a。
 /// `nonisolated` + `@unchecked Sendable`——installTap 的回调在音频渲染线程运行。
 ///
-/// 核心设计：硬件 tap 走硬件 format（通常 48kHz），**通过 AVAudioConverter 降到 16kHz**
-/// 再写入文件。之前直接把硬件 buffer 写进 16kHz-header 的文件，导致播放时被拉伸。
+/// 核心设计：
+/// 1. 硬件 tap 走硬件 format（通常 48kHz），**通过 AVAudioConverter 降到 16kHz**
+///    再写入文件。之前直接把硬件 buffer 写进 16kHz-header 的文件，导致播放被拉伸。
+/// 2. 传给 bufferObserver 的 frame position 是我们自己维护的 **从 0 开始的单调计数**，
+///    不是 `AVAudioTime.sampleTime`——后者是 host 时钟的绝对 sample 值，常是几百万/
+///    几亿的大数，直接喂 SoundAnalysis 会让 SNClassificationResult.timeRange 算出
+///    完全错位的时间戳（几千秒量级），事件时间全错。
 nonisolated final class AudioRecorder: @unchecked Sendable {
 
     enum RecorderError: Error {
@@ -18,7 +23,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     }
 
     /// tap 回调时额外透出原始 buffer 给外部（SoundAnalysis 等）。
-    /// 注意：这里给出的是 **硬件 format 的 buffer**，不是文件里存的 16kHz 版本。
+    /// 第二个参数是**从本次录音开始的单调帧计数**，不是 AVAudioTime.sampleTime。
     typealias BufferObserver = @Sendable (AVAudioPCMBuffer, AVAudioFramePosition) -> Void
 
     private let engine = AVAudioEngine()
@@ -28,7 +33,11 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     private var _isRunning = false
     private let lock = NSLock()
 
-    /// 配置 AVAudioSession 为 .record。必须在 start() 之前调用；中间可读 `inputFormat`。
+    /// 本次录音累计 tap 回调接收到的帧数。每次 start() 会归零。
+    /// 只有 tap 回调（串行）会写它，`nonisolated(unsafe)` 在此 OK。
+    nonisolated(unsafe) private var framesProcessed: AVAudioFramePosition = 0
+
+    /// 配置 AVAudioSession 为 .record。必须在 start() 之前调用。
     func setupSession() throws {
         let session = AVAudioSession.sharedInstance()
         do {
@@ -39,7 +48,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         }
     }
 
-    /// 当前 input 的 hardware format。setupSession 之后读取；供 SnoreDetector 等初始化用。
+    /// 当前 input 的 hardware format。setupSession 之后读取。
     var inputFormat: AVAudioFormat {
         engine.inputNode.outputFormat(forBus: 0)
     }
@@ -54,7 +63,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         let input = engine.inputNode
         let hardwareFormat = input.outputFormat(forBus: 0)
 
-        // 目标格式：16kHz mono PCM Float32。AVAudioFile 写入时会进一步 AAC 压缩。
+        // 目标格式：16kHz mono PCM Float32
         guard let target = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16000,
@@ -89,12 +98,19 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             throw RecorderError.fileCreationFailed(error)
         }
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: hardwareFormat) { [weak self, bufferObserver] buffer, when in
+        // 归零帧计数器：每次录音从 0 开始
+        framesProcessed = 0
+
+        input.installTap(onBus: 0, bufferSize: 4096, format: hardwareFormat) { [weak self, bufferObserver] buffer, _ in
             guard let self else { return }
 
-            // 1. 原始硬件 buffer 透传给观察者（SoundAnalysis、NoiseMonitor 等）
-            //    SNAudioStreamAnalyzer 自己会 resample，无需我们干预
-            bufferObserver?(buffer, when.sampleTime)
+            // 用本次录音内的单调帧计数作为事件时间锚点。
+            // （tap 回调被 AVAudioEngine 串行化，此处读-改-写无需额外锁。）
+            let frame = self.framesProcessed
+            self.framesProcessed = frame &+ AVAudioFramePosition(buffer.frameLength)
+
+            // 1. 原始硬件 buffer 透传给观察者
+            bufferObserver?(buffer, frame)
 
             // 2. 降采样到 16kHz mono 再写文件
             guard let file = self.audioFile,
