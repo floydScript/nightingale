@@ -7,10 +7,17 @@ struct SessionDetailView: View {
     let session: SleepSession
     let fileStore: AudioFileStore
 
+    @Environment(\.modelContext) private var modelContext
     @StateObject private var player = SimpleAudioPlayer()
     /// 正在播放的事件 ID；nil 表示播整夜音频或未在播。
     @State private var selectedEventID: UUID?
     @State private var isPlayingFullNight = false
+
+    // Phase 2 晨间打卡的本地编辑缓冲，避免每输入一个字都写 SwiftData
+    @State private var moodDraft: String = ""
+    @State private var noteDraft: String = ""
+    // 控制 onChange 初始化时不触发保存
+    @State private var didHydrate = false
 
     var body: some View {
         ZStack {
@@ -18,7 +25,11 @@ struct SessionDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     header
+                    morningCheckIn
                     metricsGrid
+
+                    sectionTitle("综合时间轴")
+                    OverlayTimelineChart(session: session)
 
                     sectionTitle("睡眠分期")
                     SleepStageChart(session: session)
@@ -38,6 +49,8 @@ struct SessionDetailView: View {
                     sectionTitle("整夜音频")
                     fullNightPlayer
 
+                    archiveButton
+
                     Spacer().frame(height: 30)
                 }
                 .padding(.horizontal, Theme.padding)
@@ -46,6 +59,7 @@ struct SessionDetailView: View {
         }
         .navigationTitle(session.startTime.formatted(date: .abbreviated, time: .omitted))
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear(perform: hydrateDrafts)
         .onDisappear { player.stop() }
     }
 
@@ -61,6 +75,74 @@ struct SessionDetailView: View {
                 .foregroundStyle(Theme.accent)
         }
     }
+
+    // MARK: Phase 2 · 晨间打卡
+
+    private static let moodOptions: [String] = ["😴", "😊", "😐", "😫", "🤒", "🎉"]
+
+    private var morningCheckIn: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("晨间打卡")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(Self.moodOptions, id: \.self) { emoji in
+                        Button {
+                            moodDraft = (moodDraft == emoji) ? "" : emoji
+                        } label: {
+                            Text(emoji)
+                                .font(.system(size: 30))
+                                .padding(10)
+                                .frame(minWidth: 54, minHeight: 54)
+                                .background(moodDraft == emoji ? Theme.accent.opacity(0.25) : Theme.surfaceElevated)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .stroke(moodDraft == emoji ? Theme.accent : Color.clear, lineWidth: 2)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            TextField("一句话", text: $noteDraft, axis: .vertical)
+                .lineLimit(1...3)
+                .padding(12)
+                .background(Theme.surfaceElevated)
+                .foregroundStyle(Theme.textPrimary)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .submitLabel(.done)
+        }
+        .padding()
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        .onChange(of: moodDraft) { _, _ in persistMorningInputsIfHydrated() }
+        .onChange(of: noteDraft) { _, _ in persistMorningInputsIfHydrated() }
+    }
+
+    private func hydrateDrafts() {
+        moodDraft = session.morningMood ?? ""
+        noteDraft = session.morningNote ?? ""
+        didHydrate = true
+    }
+
+    private func persistMorningInputsIfHydrated() {
+        guard didHydrate else { return }
+        let newMood: String? = moodDraft.isEmpty ? nil : moodDraft
+        let newNote: String? = noteDraft.isEmpty ? nil : noteDraft
+        if session.morningMood != newMood {
+            session.morningMood = newMood
+        }
+        if session.morningNote != newNote {
+            session.morningNote = newNote
+        }
+        try? modelContext.save()
+    }
+
+    // MARK: 指标 / 图表
 
     private var metricsGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
@@ -154,6 +236,28 @@ struct SessionDetailView: View {
         }
     }
 
+    // MARK: 归档按钮（Phase 2）
+
+    private var archiveButton: some View {
+        Button {
+            session.isArchived.toggle()
+            try? modelContext.save()
+        } label: {
+            HStack {
+                Image(systemName: session.isArchived ? "archivebox.fill" : "archivebox")
+                Text(session.isArchived ? "已归档（点击取消）" : "归档这一晚")
+                    .bold()
+                Spacer()
+            }
+            .padding()
+            .frame(maxWidth: .infinity)
+            .background(session.isArchived ? Theme.accentSecondary.opacity(0.25) : Theme.surface)
+            .foregroundStyle(session.isArchived ? Theme.accentSecondary : Theme.textPrimary)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Tap handlers
 
     private func handleEventTap(_ event: SleepEvent) {
@@ -202,6 +306,13 @@ private struct EventRow: View {
                 Text(event.timestamp.formatted(date: .omitted, time: .standard))
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
+                if event.type == .sleepTalk, let t = event.transcript, !t.isEmpty {
+                    Text(t)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             Spacer()
             Text(String(format: "%.0fs · %.0f%%", event.duration, event.confidence * 100))

@@ -14,28 +14,36 @@ final class RecorderController: ObservableObject {
     private let permissions: PermissionManager
     private let healthKit: HealthKitSync
     private let clipExtractor: ClipExtractor
+    private let transcriber: SleepTalkTranscriber
 
     private var currentSession: SleepSession?
     private var tickTimer: Timer?
     private var interruptionObserver: NSObjectProtocol?
 
-    // 打呼识别链
-    private var detector: SnoreDetector?
-    private var debouncer = SnoreDebouncer()
-    private var detectionTask: Task<Void, Never>?
+    // 打呼识别链（Phase 1B）
+    private var snoreDetector: SnoreDetector?
+    private var snoreDebouncer = SnoreDebouncer()
+    private var snoreTask: Task<Void, Never>?
+
+    // 梦话识别链（Phase 2）
+    private var talkDetector: SleepTalkDetector?
+    private var talkDebouncer = SleepTalkDebouncer()
+    private var talkTask: Task<Void, Never>?
 
     init(
         modelContext: ModelContext,
         fileStore: AudioFileStore,
         permissions: PermissionManager,
         healthKit: HealthKitSync,
-        clipExtractor: ClipExtractor
+        clipExtractor: ClipExtractor,
+        transcriber: SleepTalkTranscriber = SleepTalkTranscriber()
     ) {
         self.modelContext = modelContext
         self.fileStore = fileStore
         self.permissions = permissions
         self.healthKit = healthKit
         self.clipExtractor = clipExtractor
+        self.transcriber = transcriber
         observeAudioInterruptions()
     }
 
@@ -45,7 +53,7 @@ final class RecorderController: ObservableObject {
         }
     }
 
-    /// 开始录音。未授权自动请求。会同时启动 SnoreDetector。
+    /// 开始录音。未授权自动请求。会同时启动 SnoreDetector + SleepTalkDetector。
     func start() async {
         guard case .idle = state else { return }
 
@@ -64,30 +72,17 @@ final class RecorderController: ObservableObject {
             // 1. 先配置 session，让 recorder.inputFormat 可读
             try recorder.setupSession()
 
-            // 2. 基于 hardware format 构造并启动 SnoreDetector
+            // 2. 基于 hardware format 构造两路检测器
             let format = recorder.inputFormat
-            let d = SnoreDetector(format: format)
-            do {
-                try d.start()
-                detector = d
-                debouncer = SnoreDebouncer()
-                detectionTask = Task { [weak self] in
-                    for await detection in d.detections {
-                        await MainActor.run {
-                            self?.handleDetection(detection)
-                        }
-                    }
-                }
-            } catch {
-                NSLog("SnoreDetector start failed (continuing recording without detection): \(error)")
-                detector = nil
-            }
+            startSnoreDetector(format: format)
+            startSleepTalkDetector(format: format)
 
-            // 3. 启动录音引擎，把 detector.feed 挂到 tap 回调
-            let observer: AudioRecorder.BufferObserver? = if let det = detector {
-                { buffer, frame in det.feed(buffer, atFrame: frame) }
-            } else {
-                nil
+            // 3. 启动录音引擎，把 detector.feed 挂到 tap 回调；同一个 buffer fan-out 到两个 detector
+            let snore = snoreDetector
+            let talk = talkDetector
+            let observer: AudioRecorder.BufferObserver? = { buffer, frame in
+                snore?.feed(buffer, atFrame: frame)
+                talk?.feed(buffer, atFrame: frame)
             }
             try recorder.start(writingTo: url, bufferObserver: observer)
             session.fullAudioPath = fileStore.relativePath(for: url)
@@ -99,28 +94,28 @@ final class RecorderController: ObservableObject {
         } catch {
             modelContext.delete(session)
             try? modelContext.save()
-            detector?.stop()
-            detectionTask?.cancel()
-            detector = nil
-            detectionTask = nil
+            teardownDetectors()
             state = .failed(message: "无法启动录音：\(error.localizedDescription)")
         }
     }
 
-    /// 停止录音 + 触发异步后处理（剪片段 + 拉 HealthKit）。
+    /// 停止录音 + 触发异步后处理（HealthKit + 呼吸暂停检测 + 剪片段 + 梦话转写）。
     func stop() {
         guard case .recording = state else { return }
         state = .finalizing
         stopTick()
 
-        // 停 detector 并 flush 最后一个事件
-        detector?.stop()
-        if let last = debouncer.flush() {
+        // 停 snore detector 并 flush
+        snoreDetector?.stop()
+        if let last = snoreDebouncer.flush() {
             emitSnoreEvent(last)
         }
-        detectionTask?.cancel()
-        detectionTask = nil
-        detector = nil
+        // 停 sleep-talk detector 并 flush
+        talkDetector?.stop()
+        if let last = talkDebouncer.flush() {
+            emitSleepTalkEvent(last)
+        }
+        teardownDetectors()
 
         do {
             try recorder.stop()
@@ -136,7 +131,7 @@ final class RecorderController: ObservableObject {
                 NSLog("Failed to save session: \(error)")
             }
 
-            // 异步后处理：先拉 HealthKit（快），再剪片段（慢）
+            // 异步后处理
             Task { [weak self] in
                 await self?.postProcess(session: session)
             }
@@ -146,11 +141,67 @@ final class RecorderController: ObservableObject {
         state = .idle
     }
 
-    // MARK: - 事件处理
+    // MARK: - Detector lifecycle
 
-    private func handleDetection(_ d: SnoreDetector.Detection) {
-        if let merged = debouncer.feed(d) {
+    private func startSnoreDetector(format: AVAudioFormat) {
+        do {
+            let d = SnoreDetector(format: format)
+            try d.start()
+            snoreDetector = d
+            snoreDebouncer = SnoreDebouncer()
+            snoreTask = Task { [weak self] in
+                for await detection in d.detections {
+                    await MainActor.run {
+                        self?.handleSnoreDetection(detection)
+                    }
+                }
+            }
+        } catch {
+            NSLog("SnoreDetector start failed (continuing without snore detection): \(error)")
+            snoreDetector = nil
+        }
+    }
+
+    private func startSleepTalkDetector(format: AVAudioFormat) {
+        do {
+            let d = SleepTalkDetector(format: format)
+            try d.start()
+            talkDetector = d
+            talkDebouncer = SleepTalkDebouncer()
+            talkTask = Task { [weak self] in
+                for await detection in d.detections {
+                    await MainActor.run {
+                        self?.handleSleepTalkDetection(detection)
+                    }
+                }
+            }
+        } catch {
+            NSLog("SleepTalkDetector start failed (continuing without sleep-talk detection): \(error)")
+            talkDetector = nil
+        }
+    }
+
+    private func teardownDetectors() {
+        snoreTask?.cancel()
+        snoreTask = nil
+        snoreDetector = nil
+
+        talkTask?.cancel()
+        talkTask = nil
+        talkDetector = nil
+    }
+
+    // MARK: - Event emission
+
+    private func handleSnoreDetection(_ d: SnoreDetector.Detection) {
+        if let merged = snoreDebouncer.feed(d) {
             emitSnoreEvent(merged)
+        }
+    }
+
+    private func handleSleepTalkDetection(_ d: SleepTalkDetector.Detection) {
+        if let merged = talkDebouncer.feed(d) {
+            emitSleepTalkEvent(merged)
         }
     }
 
@@ -168,12 +219,38 @@ final class RecorderController: ObservableObject {
         try? modelContext.save()
     }
 
-    // MARK: - 异步后处理
+    private func emitSleepTalkEvent(_ merged: SleepTalkDebouncer.Merged) {
+        guard let session = currentSession else { return }
+        let timestamp = session.startTime.addingTimeInterval(merged.start)
+        let event = SleepEvent(
+            session: session,
+            timestamp: timestamp,
+            duration: merged.duration,
+            type: .sleepTalk,
+            confidence: merged.confidence
+        )
+        modelContext.insert(event)
+        try? modelContext.save()
+    }
+
+    private func emitApneaEvent(_ candidate: ApneaDetector.Candidate, session: SleepSession) {
+        let event = SleepEvent(
+            session: session,
+            timestamp: candidate.start,
+            duration: candidate.duration,
+            type: .suspectedApnea,
+            confidence: candidate.confidence
+        )
+        modelContext.insert(event)
+        try? modelContext.save()
+    }
+
+    // MARK: - Async post-processing
 
     private func postProcess(session: SleepSession) async {
-        // 1. HealthKit
-        let granted = await healthKit.requestAuthorization()
-        if granted {
+        // 1. 拉 HealthKit（快）
+        let hkGranted = await healthKit.requestAuthorization()
+        if hkGranted {
             let end = session.endTime ?? Date()
             let samples = await healthKit.pullSamples(from: session.startTime, to: end)
             for s in samples {
@@ -184,7 +261,11 @@ final class RecorderController: ObservableObject {
             NSLog("HealthKit pulled \(samples.count) samples")
         }
 
-        // 2. 剪片段
+        // 2. 疑似呼吸暂停检测（需在有 SpO2 样本之后、在剪片段之前，
+        //    这样新插入的 apnea 事件也能被 clip extraction 剪出片段）
+        runApneaDetection(session: session)
+
+        // 3. 剪片段
         guard let relPath = session.fullAudioPath else { return }
         let fullURL = fileStore.url(fromRelativePath: relPath)
         let events = session.events
@@ -201,6 +282,48 @@ final class RecorderController: ObservableObject {
             }
         }
         NSLog("Clip extraction done for \(events.count) events")
+
+        // 4. 梦话转写（逐个事件调用 Speech 框架，失败继续）
+        let talkEvents = session.events.filter { $0.type == .sleepTalk && $0.transcript == nil }
+        for event in talkEvents {
+            guard let path = event.clipPath else { continue }
+            let url = fileStore.url(fromRelativePath: path)
+            let transcript = await transcriber.transcribe(url: url)
+            if let t = transcript {
+                event.transcript = t
+                try? modelContext.save()
+            }
+        }
+        NSLog("Sleep-talk transcription done for \(talkEvents.count) events")
+    }
+
+    /// 纯函数式呼吸暂停判定。输入是 events + SpO2 样本，输出新 SleepEvent。
+    private func runApneaDetection(session: SleepSession) {
+        let audioEvents: [ApneaDetector.AudioEvent] = session.events
+            .filter { $0.type == .snore || $0.type == .sleepTalk }
+            .map { .init(timestamp: $0.timestamp, duration: $0.duration) }
+
+        let spo2Samples: [ApneaDetector.Spo2Sample] = session.sensorSamples
+            .filter { $0.kind == .spo2 }
+            .map { .init(timestamp: $0.timestamp, percent: $0.value) }
+
+        guard !spo2Samples.isEmpty else {
+            NSLog("Skipping apnea detection: no SpO2 samples")
+            return
+        }
+
+        let detector = ApneaDetector()
+        let input = ApneaDetector.Input(
+            sessionStart: session.startTime,
+            sessionEnd: session.endTime ?? Date(),
+            audioEvents: audioEvents,
+            spo2Samples: spo2Samples
+        )
+        let candidates = detector.detect(input)
+        for c in candidates {
+            emitApneaEvent(c, session: session)
+        }
+        NSLog("Apnea detection produced \(candidates.count) candidate(s)")
     }
 
     // MARK: - Tick / interruption

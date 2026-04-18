@@ -16,6 +16,12 @@ struct AppRoot: View {
             ReportListView(fileStore: fileStore)
                 .tabItem { Label("报告", systemImage: "chart.xyaxis.line") }
 
+            TrendsView()
+                .tabItem { Label("趋势", systemImage: "chart.line.uptrend.xyaxis") }
+
+            ArchiveView(fileStore: fileStore)
+                .tabItem { Label("档案", systemImage: "books.vertical.fill") }
+
             SettingsView(
                 fileStore: fileStore,
                 permissions: permissions,
