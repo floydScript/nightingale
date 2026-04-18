@@ -1,53 +1,68 @@
 import Foundation
 
-/// 免费 Apple ID 开发者证书到期天数计算（Phase 1 Tail · T1.2）。
+/// 免费 Apple ID 开发者证书到期天数（Phase 1 Tail · T1.2）。
 ///
-/// 免费开发者证书的 provisioning profile 生命周期为 7 天。App bundle 的
-/// 创建时间（文件系统 `.creationDate`）大致对应本次部署/签名时刻。我们据此
-/// 估算"还剩几天需要重新插回 Mac 部署"。
+/// **正确数据源**：app bundle 内嵌的 `embedded.mobileprovision` 文件里的
+/// `ExpirationDate` 字段。这才是真实的 provisioning profile 过期时间。
 ///
-/// 不是严格意义上的证书有效期判断——真实的 profile 过期时间只在解 mobile-
-/// provision 文件里才精确。但对自用 app、免费账号、固定 7 天周期，此近似足够。
+/// 原先用 `Bundle.main.bundleURL.creationDate` 推算——在 iOS 真机上这个
+/// 值不可靠（常返回 epoch 0 或很久以前），导致过去总是显示"剩余 0 天"。
+///
+/// Simulator 没有 mobileprovision 文件，在模拟器上 `remainingDays` 会返回 nil。
 enum CertExpiry {
 
-    /// 免费证书标称的有效天数。
     static let totalDays: Int = 7
 
-    /// 用 `Bundle.main` 的创建时间推算，返回当前剩余的"日历天数"（向下取整；最小 0）。
-    /// 如果拿不到 creationDate（极罕见，如裸跑在 Simulator 上某些情况下），返回 nil。
+    /// 解析 embedded.mobileprovision 拿到真实 ExpirationDate；拿不到返回 nil。
+    static func expiryDate() -> Date? {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+
+        // mobileprovision 是 CMS (PKCS#7) 签名包，内嵌 XML plist 作为明文。
+        // 找 <?xml ... </plist> 抽出来解析即可。
+        guard let xmlStart = "<?xml".data(using: .utf8),
+              let xmlEnd = "</plist>".data(using: .utf8),
+              let startRange = data.range(of: xmlStart),
+              let endRange = data.range(of: xmlEnd, in: startRange.upperBound..<data.count) else {
+            return nil
+        }
+
+        let plistData = data.subdata(in: startRange.lowerBound..<endRange.upperBound)
+        guard let plist = try? PropertyListSerialization.propertyList(
+            from: plistData,
+            options: [],
+            format: nil
+        ) as? [String: Any] else {
+            return nil
+        }
+        return plist["ExpirationDate"] as? Date
+    }
+
     static func remainingDays(now: Date = Date()) -> Int? {
-        guard let created = bundleCreationDate() else { return nil }
-        let elapsed = now.timeIntervalSince(created)
-        let remain = Double(totalDays) - elapsed / 86_400.0
+        guard let expiry = expiryDate() else { return nil }
+        let remain = expiry.timeIntervalSince(now) / 86_400.0
         if remain < 0 { return 0 }
         return Int(remain.rounded(.down))
     }
 
-    /// 读取 app bundle 的创建时间（文件系统元数据）。
-    static func bundleCreationDate() -> Date? {
-        let bundleURL = Bundle.main.bundleURL
-        let attrs = try? FileManager.default.attributesOfItem(atPath: bundleURL.path)
-        if let d = attrs?[.creationDate] as? Date {
-            return d
-        }
-        // 旧 API 兼容：有时 Bundle.main.bundlePath 走 NSFileCreationDate
-        if let d = attrs?[FileAttributeKey.creationDate] as? Date {
-            return d
-        }
-        return nil
-    }
-
-    /// 给 UI 用的简短提示字符串。
     static func shortStatus(now: Date = Date()) -> String {
         if let d = remainingDays(now: now) {
             return "证书剩余 \(d) 天"
         }
-        return "证书状态未知"
+        return "证书状态未知（模拟器或非免费证书）"
     }
 
-    /// 是否应该在首页显示黄色 banner（剩余 ≤ 2 天）。
     static func shouldWarnOnHome(now: Date = Date()) -> Bool {
         guard let d = remainingDays(now: now) else { return false }
         return d <= 2
+    }
+
+    /// 保留给老调用点 / 既有测试的 legacy 入口——实际不用于证书判断。
+    /// 仅在未来要诊断 bundle 元数据时有用。
+    static func bundleCreationDate() -> Date? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: Bundle.main.bundleURL.path)
+        return attrs?[.creationDate] as? Date
     }
 }
