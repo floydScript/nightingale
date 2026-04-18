@@ -3,6 +3,10 @@ import Foundation
 /// 管理录音文件在沙盒中的路径与清理。
 /// 声明为 `nonisolated` 因为这是纯文件 IO，需要从任意 context 调用
 /// （录音回调、测试、MainActor UI 等）。
+///
+/// 目录**自愈**：`recordingsDirectory` 和 `clipsDirectory` 每次访问都会 ensure
+/// 父目录存在，避免 wipeAll 之类操作把目录整个删掉之后，后续文件写入撞上
+/// "parent does not exist" 错（AVAssetExportSession 会报 sandbox -17508）。
 nonisolated final class AudioFileStore: @unchecked Sendable {
 
     private let baseDirectory: URL
@@ -19,14 +23,18 @@ nonisolated final class AudioFileStore: @unchecked Sendable {
         self.init(baseDirectory: docs)
     }
 
-    /// 整夜录音目录。
+    /// 整夜录音目录。自愈：每次读都会 ensure。
     var recordingsDirectory: URL {
-        baseDirectory.appendingPathComponent("Recordings", isDirectory: true)
+        let url = baseDirectory.appendingPathComponent("Recordings", isDirectory: true)
+        ensureDirectoryExists(url)
+        return url
     }
 
-    /// 事件片段目录（Phase 1B 新增）。
+    /// 事件片段目录。自愈：每次读都会 ensure。
     var clipsDirectory: URL {
-        baseDirectory.appendingPathComponent("Clips", isDirectory: true)
+        let url = baseDirectory.appendingPathComponent("Clips", isDirectory: true)
+        ensureDirectoryExists(url)
+        return url
     }
 
     /// 某个 session 的整夜音频 URL。
