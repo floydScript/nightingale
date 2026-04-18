@@ -62,8 +62,12 @@ nonisolated final class SleepTalkDetector: @unchecked Sendable {
 
 private nonisolated final class SpeechObserver: NSObject, SNResultsObserving, @unchecked Sendable {
     let continuation: AsyncStream<SleepTalkDetector.Detection>.Continuation
-    /// 置信度阈值。低于这个不发。梦话阈值和打呼同样设 0.7。
-    let threshold: Double = 0.7
+    /// 置信度阈值。清醒朗读几秒钟常在 0.5-0.7 之间，0.7 过高；降到 0.5。
+    let emitThreshold: Double = 0.5
+    /// 低于 emit 阈值但 ≥ debugThreshold 的分类也会 NSLog，方便排查"为什么没识别"。
+    let debugLogThreshold: Double = 0.3
+    /// 同时监听的类——speech 是主力，whispering / chatter 作为兜底（睡觉时低声说梦话常命中 whispering）。
+    static let candidateIdentifiers: [String] = ["speech", "whispering", "chatter", "singing"]
 
     init(continuation: AsyncStream<SleepTalkDetector.Detection>.Continuation) {
         self.continuation = continuation
@@ -71,14 +75,28 @@ private nonisolated final class SpeechObserver: NSObject, SNResultsObserving, @u
 
     func request(_ request: SNRequest, didProduce result: SNResult) {
         guard let result = result as? SNClassificationResult else { return }
-        if let c = result.classification(forIdentifier: "speech"), c.confidence >= threshold {
-            let d = SleepTalkDetector.Detection(
-                streamTime: result.timeRange.start.seconds,
-                duration: result.timeRange.duration.seconds,
-                confidence: c.confidence
-            )
-            continuation.yield(d)
+
+        // 记录所有候选类的置信度（≥ 0.3）——Xcode console 里能看
+        var best: (identifier: String, confidence: Double)? = nil
+        for ident in Self.candidateIdentifiers {
+            if let c = result.classification(forIdentifier: ident) {
+                if c.confidence >= debugLogThreshold {
+                    NSLog("SleepTalk[t=%.1f]: %@=%.2f", result.timeRange.start.seconds, ident, c.confidence)
+                }
+                if best == nil || c.confidence > best!.confidence {
+                    best = (ident, c.confidence)
+                }
+            }
         }
+
+        guard let best, best.confidence >= emitThreshold else { return }
+
+        let d = SleepTalkDetector.Detection(
+            streamTime: result.timeRange.start.seconds,
+            duration: result.timeRange.duration.seconds,
+            confidence: best.confidence
+        )
+        continuation.yield(d)
     }
 
     func request(_ request: SNRequest, didFailWithError error: Error) {
