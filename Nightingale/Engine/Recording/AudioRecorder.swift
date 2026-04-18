@@ -80,15 +80,17 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         self.targetFormat = target
         self.converter = conv
 
-        // AAC 64 kbps mono 16kHz。之前 32kbps 对 SFSpeechRecognizer 识别太损，
-        // 实测 Xcode console `final text=""` 即使 SoundAnalysis 置信度 0.85。
-        // 64 kbps 存储代价翻倍（~220 MB/8h），仍在 7 天留存预算内。
+        // AAC 48 kbps mono 16kHz。
+        // 原来 32 kbps 对 SFSpeechRecognizer 识别太损（SoundAnalysis 置信度 0.85 时
+        // final text 仍空）；想上 64kbps + quality.high 但 iOS AAC codec 拒绝这个组合
+        // （AudioConverterSetProperty err 560226676）。48 + medium 是安全稳定档。
+        // 存储代价约 ~170 MB/8h，仍在 7 天留存预算内。
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 16000,
             AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 64000,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+            AVEncoderBitRateKey: 48000,
+            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
         ]
 
         do {
